@@ -1,8 +1,38 @@
 import { z } from "zod";
 
+export const defaultApiBaseUrl = "https://api.xiaomimimo.com/v1";
+export const apiBaseUrlSchema = z
+  .string()
+  .trim()
+  .max(2048)
+  .url("请填写有效的服务地址。")
+  .refine((value) => {
+    try {
+      const url = new URL(value);
+      return (
+        ["http:", "https:"].includes(url.protocol) &&
+        !url.username &&
+        !url.password &&
+        !url.hash
+      );
+    } catch {
+      return false;
+    }
+  }, "请填写 HTTP 或 HTTPS 服务地址，地址中请勿包含登录信息或片段。");
+export const apiSettingsSchema = z.object({
+  apiKey: z.string().trim().optional(),
+  baseUrl: apiBaseUrlSchema.optional(),
+});
+
 export const voiceModes = ["preset", "design", "clone"] as const;
 export type VoiceMode = (typeof voiceModes)[number];
 export const presetVoices = [
+  {
+    id: "mimo_default",
+    label: "MiMo 默认",
+    description: "中国集群为冰糖，其他集群为 Mia",
+    color: "peach",
+  },
   {
     id: "茉莉",
     description: "柔和细腻",
@@ -68,6 +98,9 @@ export const voiceConfigSchema = z.object({
   referenceId: z.string().nullable(),
 });
 export type VoiceConfig = z.infer<typeof voiceConfigSchema>;
+export const audioFormats = ["wav", "mp3", "pcm16"] as const;
+export type AudioFormat = (typeof audioFormats)[number];
+
 export const draftSchema = z.object({
   id: z.uuid(),
   title: z.string().trim().min(1).max(80),
@@ -75,10 +108,22 @@ export const draftSchema = z.object({
   instruction: z.string().max(2000),
   voiceId: z.string().nullable(),
   config: voiceConfigSchema,
-  format: z.enum(["wav", "mp3"]),
+  format: z.enum(audioFormats),
   stream: z.boolean(),
+  compatibilityStream: z.boolean().optional(),
+  optimizeTextPreview: z.boolean().optional(),
 });
 export type Draft = z.infer<typeof draftSchema> & { updatedAt: number };
+
+export function usesTextPreview(draft: Draft) {
+  return draft.config.mode === "design" && draft.optimizeTextPreview === true;
+}
+
+export function outputMode(draft: Draft) {
+  if (draft.format === "mp3") return "complete";
+  if (draft.config.mode === "preset") return draft.stream ? "live" : "complete";
+  return draft.compatibilityStream ? "compatible" : "complete";
+}
 export const saveVoiceSchema = z.object({
   id: z.uuid().optional(),
   name: z.string().trim().min(1).max(40),
@@ -93,7 +138,7 @@ export type Voice = Omit<z.infer<typeof saveVoiceSchema>, "id"> & {
 export type Asset = {
   id: string;
   filename: string;
-  format: "wav" | "mp3";
+  format: AudioFormat;
   bytes: number;
   createdAt: number;
 };
@@ -105,7 +150,11 @@ export type Generation = {
   instruction: string;
   config: VoiceConfig;
   voiceName: string;
-  format: "wav" | "mp3";
+  format: AudioFormat;
+  stream?: boolean;
+  compatibilityStream?: boolean;
+  optimizeTextPreview?: boolean;
+  finalTextPreview?: string;
   status: "generating" | "completed" | "failed";
   assetId: string | null;
   duration: number | null;
@@ -120,7 +169,13 @@ export type StudioState = {
   generations: Generation[];
   assets: Asset[];
   configured: boolean;
+  baseUrl: string;
+  apiKeyLength: number;
 };
+export type ApiSettingsState = Pick<
+  StudioState,
+  "configured" | "baseUrl" | "apiKeyLength"
+>;
 export const initialConfig: VoiceConfig = {
   mode: "preset",
   preset: "茉莉",
@@ -141,7 +196,7 @@ export function modelForMode(mode: VoiceMode) {
 export function voiceLabel(config: VoiceConfig) {
   if (config.mode === "design") return "自定义音色";
   if (config.mode === "clone") return "克隆音色";
-  return config.preset;
+  return config.preset === "mimo_default" ? "MiMo 默认" : config.preset;
 }
 export function formatDuration(seconds: number) {
   const value = Math.max(0, Math.floor(seconds));

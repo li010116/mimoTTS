@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import {
   draftSchema,
   modelForMode,
+  outputMode,
+  usesTextPreview,
   voiceLabel,
   type Asset,
   type Generation,
@@ -11,15 +13,17 @@ import {
 } from "./types";
 import {
   assetPath,
-  getApiKey,
+  getApiSettings,
   getRecord,
   listRecords,
   putRecord,
   saveAudio,
 } from "./store";
 import { readSse } from "./sse";
+import { getApiEndpoint, getApiErrorMessage } from "./api-connection";
+import { getApiAuthHeaders } from "./api-auth";
 
-function pcmToWav(pcm: Buffer) {
+export function pcmToWav(pcm: Buffer) {
   if (pcm.length % 2) throw new Error("返回的音频数据不完整，请重试。");
   const header = Buffer.alloc(44);
   header.write("RIFF", 0);
@@ -62,19 +66,21 @@ export async function generate(request: Request) {
       { error: "文案或声音设置有误，请检查后重试。" },
       { status: 400 },
     );
-  const draft = parsed.data;
-  if (!draft.text.trim())
+  const draft = { ...parsed.data, updatedAt: Date.now() };
+  const optimizeTextPreview = usesTextPreview(draft);
+  if (!draft.text.trim() && !optimizeTextPreview)
     return Response.json(
       { error: "先写一段想要朗读的文字。" },
       { status: 400 },
     );
-  const apiKey = getApiKey();
+  const { apiKey, baseUrl } = getApiSettings();
   if (!apiKey)
     return Response.json(
       { error: "请先在设置中配置 MiMo API Key。" },
       { status: 422 },
     );
   const config = draft.config;
+  const endpoint = getApiEndpoint(baseUrl, "chat/completions");
   if (config.mode === "design" && !config.description.trim())
     return Response.json({ error: "请填写音色描述。" }, { status: 400 });
   let reference: string | undefined;
@@ -82,7 +88,7 @@ export async function generate(request: Request) {
     const asset = config.referenceId
       ? getRecord<Asset>("asset", config.referenceId)
       : null;
-    if (!asset)
+    if (!asset || asset.format === "pcm16")
       return Response.json(
         { error: "请上传 MP3 或 WAV 参考音频。" },
         { status: 400 },
@@ -106,6 +112,9 @@ export async function generate(request: Request) {
     config,
     voiceName: voice?.name ?? voiceLabel(config),
     format: draft.format,
+    stream: draft.stream,
+    compatibilityStream: draft.compatibilityStream,
+    optimizeTextPreview,
     status: "generating",
     assetId: null,
     duration: null,
@@ -114,10 +123,10 @@ export async function generate(request: Request) {
     error: null,
     createdAt: Date.now(),
   };
-  putRecord("draft", { ...draft, updatedAt: Date.now() });
+  putRecord("draft", draft);
   putRecord("generation", generation);
-  const streaming =
-    draft.stream && config.mode === "preset" && draft.format === "wav";
+  const mode = outputMode(draft);
+  const streaming = mode !== "complete";
   const instruction = [
     config.mode === "design" ? config.description : "",
     draft.instruction,
@@ -128,12 +137,13 @@ export async function generate(request: Request) {
     model: modelForMode(config.mode),
     messages: [
       ...(instruction ? [{ role: "user", content: instruction }] : []),
-      { role: "assistant", content: draft.text },
+      ...(draft.text.trim() ? [{ role: "assistant", content: draft.text }] : []),
     ],
     audio: {
       format: streaming ? "pcm16" : draft.format,
       ...(config.mode === "preset" ? { voice: config.preset } : {}),
       ...(reference ? { voice: reference } : {}),
+      ...(optimizeTextPreview ? { optimize_text_preview: true } : {}),
     },
     stream: streaming,
   };
@@ -153,30 +163,21 @@ export async function generate(request: Request) {
       };
       emit({ type: "started", generation });
       try {
-        const response = await fetch(
-          "https://api.xiaomimimo.com/v1/chat/completions",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "api-key": apiKey },
-            body: JSON.stringify(body),
-            signal: AbortSignal.timeout(180000),
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...getApiAuthHeaders(baseUrl, apiKey),
           },
-        );
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(180000),
+        });
         if (!response.ok) {
-          await response.body?.cancel();
-          const errors: Record<number, string> = {
-            401: "API Key 验证失败，请在设置中检查。",
-            402: "账户余额或额度不足，请到 MiMo 平台检查。",
-            403: "当前 API Key 没有调用此模型的权限。",
-            429: "请求过于频繁，请稍后再试。",
-          };
-          throw new Error(
-            errors[response.status] ??
-              `MiMo 服务返回 ${response.status}，请检查输入或稍后重试。`,
-          );
+          throw new Error(await getApiErrorMessage(response, apiKey));
         }
         let bytes: Buffer;
         let duration: number | null = null;
+        let finalTextPreview: string | undefined;
         if (streaming) {
           const chunks: Buffer[] = [];
           let received = 0;
@@ -190,6 +191,9 @@ export async function generate(request: Request) {
             if (chunk.error)
               throw new Error("MiMo 未能完成本次生成，请稍后重试。");
             const choice = chunk.choices?.[0];
+            const preview = choice?.delta?.final_text_preview;
+            if (optimizeTextPreview && typeof preview === "string" && preview)
+              finalTextPreview = preview;
             if (choice?.finish_reason === "stop") finished = true;
             if (
               choice?.finish_reason === "content_filter" ||
@@ -203,7 +207,7 @@ export async function generate(request: Request) {
               if (received > 64 * 1024 * 1024)
                 throw new Error("音频超过单次生成大小限制。");
               chunks.push(pcm);
-              emit({ type: "audio", data: audio });
+              if (mode === "live") emit({ type: "audio", data: audio });
             }
           }
           const pcm = Buffer.concat(chunks);
@@ -211,7 +215,7 @@ export async function generate(request: Request) {
             throw new Error("MiMo 没有返回音频，请调整输入后重试。");
           if (!finished)
             throw new Error("音频传输中断，本次生成未完整完成，请重试。");
-          bytes = pcmToWav(pcm);
+          bytes = draft.format === "wav" ? pcmToWav(pcm) : pcm;
           duration = pcm.length / 48000;
         } else {
           const result = await response.json();
@@ -222,10 +226,18 @@ export async function generate(request: Request) {
           )
             throw new Error("本次生成未完整完成，请调整文案后重试。");
           const data = choice?.message?.audio?.data;
+          const preview = choice?.message?.final_text_preview;
+          if (optimizeTextPreview && typeof preview === "string" && preview)
+            finalTextPreview = preview;
           if (typeof data !== "string" || !data)
             throw new Error("MiMo 没有返回音频，请调整输入后重试。");
           bytes = Buffer.from(data, "base64");
           duration = draft.format === "wav" ? wavDuration(bytes) : null;
+        }
+        if (draft.format === "pcm16") {
+          if (!bytes.length || bytes.length % 2)
+            throw new Error("返回的音频数据不完整，请重试。");
+          duration = bytes.length / 48000;
         }
         const asset = saveAudio(
           bytes,
@@ -237,6 +249,7 @@ export async function generate(request: Request) {
           status: "completed",
           assetId: asset.id,
           duration,
+          finalTextPreview,
           elapsed: (Date.now() - generation.createdAt) / 1000,
         };
         putRecord("generation", completed);

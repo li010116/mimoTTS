@@ -312,6 +312,12 @@ export function Versions({
                     )}
                   </div>
                 </div>
+                {generation.finalTextPreview && (
+                  <details className="version-text-preview">
+                    <summary>最终播报文案</summary>
+                    <p>{generation.finalTextPreview}</p>
+                  </details>
+                )}
               </motion.article>
             ))}
           </AnimatePresence>

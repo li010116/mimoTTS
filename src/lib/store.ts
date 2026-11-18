@@ -12,14 +12,18 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { normalizeApiKey } from "./api-auth";
 import {
   type Asset,
+  type AudioFormat,
   type Draft,
   type Generation,
   type Voice,
   initialConfig,
   defaultInstruction,
   exampleText,
+  apiBaseUrlSchema,
+  defaultApiBaseUrl,
 } from "./types";
 
 export const dataDir = path.resolve(
@@ -144,31 +148,56 @@ export function defaultVoice(id: string) {
   })();
 }
 const secretPath = path.join(dataDir, ".credentials.json");
-export function getApiKey(): string {
+export function getApiSettings(): { apiKey: string; baseUrl: string } {
+  let saved: { apiKey?: unknown; baseUrl?: unknown } = {};
   if (existsSync(secretPath)) {
     try {
-      return (
-        JSON.parse(readFileSync(secretPath, "utf8")).apiKey ||
-        process.env.MIMO_API_KEY ||
-        ""
-      );
-    } catch {
-      return process.env.MIMO_API_KEY || "";
-    }
+      const parsed = JSON.parse(readFileSync(secretPath, "utf8"));
+      if (parsed && typeof parsed === "object") saved = parsed;
+    } catch {}
   }
-  return process.env.MIMO_API_KEY || "";
+  const savedUrl = apiBaseUrlSchema.safeParse(saved.baseUrl);
+  const environmentUrl = apiBaseUrlSchema.safeParse(process.env.MIMO_BASE_URL);
+  return {
+    apiKey:
+      (typeof saved.apiKey === "string" ? normalizeApiKey(saved.apiKey) : "") ||
+      normalizeApiKey(process.env.MIMO_API_KEY || "") ||
+      "",
+    baseUrl: savedUrl.success
+      ? savedUrl.data
+      : environmentUrl.success
+        ? environmentUrl.data
+        : defaultApiBaseUrl,
+  };
 }
-export function saveApiKey(apiKey: string) {
+export function saveApiSettings(update: { apiKey?: string; baseUrl?: string }) {
+  const current = getApiSettings();
+  const settings = {
+    apiKey: normalizeApiKey(update.apiKey || "") || current.apiKey,
+    baseUrl: update.baseUrl ?? current.baseUrl,
+  };
   const temporary = `${secretPath}.tmp`;
-  writeFileSync(temporary, JSON.stringify({ apiKey }), { mode: 0o600 });
+  writeFileSync(temporary, JSON.stringify(settings), { mode: 0o600 });
   renameSync(temporary, secretPath);
+  const persisted = getApiSettings();
+  if (
+    persisted.apiKey !== settings.apiKey ||
+    persisted.baseUrl !== settings.baseUrl
+  ) {
+    throw new Error("配置写入后校验失败，请检查数据目录权限后重试。");
+  }
+  return {
+    configured: Boolean(persisted.apiKey),
+    baseUrl: persisted.baseUrl,
+    apiKeyLength: persisted.apiKey.length,
+  };
 }
 export function assetPath(asset: Asset) {
   return path.join(audioDir, `${asset.id}.${asset.format}`);
 }
 export function saveAudio(
   bytes: Buffer,
-  format: "wav" | "mp3",
+  format: AudioFormat,
   filename: string,
 ): Asset {
   const asset: Asset = {

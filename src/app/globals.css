@@ -663,6 +663,9 @@
 .tag-tools > [data-slot="separator"] {
   height: 14px;
 }
+.script-menu[data-slot="dropdown-menu-content"] {
+  max-height: min(24rem, var(--radix-dropdown-menu-content-available-height));
+}
 .script-tools [data-slot="button"] {
   color: var(--muted-foreground);
   font-size: 11px;
@@ -1125,6 +1128,21 @@
 .version-playback {
   min-width: 0;
 }
+.version-text-preview {
+  margin-top: 10px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.version-text-preview summary {
+  width: fit-content;
+  cursor: pointer;
+}
+.version-text-preview p {
+  margin-top: 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+}
 .audio-player {
   display: flex;
   align-items: center;
@@ -1495,6 +1513,11 @@
   align-items: center;
   justify-content: space-between;
 }
+.api-key-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .configuration-status {
   font-size: 11px;
   color: var(--muted-foreground);
@@ -1527,6 +1550,18 @@
 .settings-actions > a > svg {
   width: 13px;
   height: 13px;
+}
+.settings-action-buttons {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.connection-test-result {
+  margin-top: 16px;
+}
+.connection-test-result[data-success="true"] > svg {
+  color: var(--positive);
 }
 .theme-select[data-slot="select-trigger"] {
   margin-left: auto;

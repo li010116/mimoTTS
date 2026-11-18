@@ -4,18 +4,20 @@ import { z } from "zod";
 import {
   assetPath,
   defaultVoice,
-  getApiKey,
+  getApiSettings,
   getRecord,
   listRecords,
   putRecord,
   removeRecord,
-  saveApiKey,
+  saveApiSettings,
   saveAudio,
 } from "@/lib/store";
-import { generate } from "@/lib/generate";
+import { generate, pcmToWav } from "@/lib/generate";
+import { testApiConnection } from "@/lib/api-connection";
 import {
   draftSchema,
   saveVoiceSchema,
+  apiSettingsSchema,
   type Asset,
   type Draft,
   type Generation,
@@ -41,6 +43,7 @@ function rejectCrossOrigin(request: Request) {
 export async function GET(request: Request, context: Context) {
   const { path } = await context.params;
   if (path[0] === "state") {
+    const settings = getApiSettings();
     return Response.json(
       {
         voices: listRecords<Voice>("voice"),
@@ -51,7 +54,9 @@ export async function GET(request: Request, context: Context) {
           (a, b) => b.createdAt - a.createdAt,
         ),
         assets: listRecords<Asset>("asset"),
-        configured: Boolean(getApiKey()),
+        configured: Boolean(settings.apiKey),
+        baseUrl: settings.baseUrl,
+        apiKeyLength: settings.apiKey.length,
       },
       { headers: { "Cache-Control": "no-store" } },
     );
@@ -59,22 +64,27 @@ export async function GET(request: Request, context: Context) {
   if (path[0] === "assets" && path[1]) {
     const asset = getRecord<Asset>("asset", path[1]);
     if (!asset) return missing();
+    const download = new URL(request.url).searchParams.has("download");
     let bytes: Buffer;
     try {
       bytes = readFileSync(assetPath(asset));
+      if (asset.format === "pcm16" && !download) bytes = pcmToWav(bytes);
     } catch {
       return missing();
     }
     const headers: Record<string, string> = {
-      "Content-Type": `audio/${asset.format === "mp3" ? "mpeg" : "wav"}`,
+      "Content-Type":
+        asset.format === "pcm16" && download
+          ? "application/octet-stream"
+          : `audio/${asset.format === "mp3" ? "mpeg" : "wav"}`,
       "Accept-Ranges": "bytes",
       "Cache-Control": "private, max-age=86400",
       "Content-Length": bytes.length.toString(),
       "X-Content-Type-Options": "nosniff",
     };
-    if (new URL(request.url).searchParams.has("download"))
+    if (download)
       headers["Content-Disposition"] =
-        `attachment; filename="mimo-${asset.id.slice(0, 8)}.${asset.format}"`;
+        `attachment; filename="mimo-${asset.id.slice(0, 8)}.${asset.format === "pcm16" ? "pcm" : asset.format}"`;
     const range = request.headers.get("range");
     if (range) {
       const match = /^bytes=(\d*)-(\d*)$/.exec(range);
@@ -134,11 +144,9 @@ export async function POST(request: Request, context: Context) {
       return Response.json(voice);
     }
     if (path[0] === "settings") {
-      const { apiKey } = z
-        .object({ apiKey: z.string().trim().min(8).max(512) })
-        .parse(await request.json());
-      saveApiKey(apiKey);
-      return Response.json({ configured: true });
+      const settings = apiSettingsSchema.parse(await request.json());
+      if (path[1] === "test") return await testApiConnection(settings);
+      return Response.json(saveApiSettings(settings));
     }
     if (path[0] === "assets") {
       const form = await request.formData();
@@ -170,6 +178,9 @@ export async function POST(request: Request, context: Context) {
     }
     return missing();
   } catch (error) {
+    if (path[0] === "settings" && error instanceof z.ZodError) {
+      return Response.json({ error: error.issues[0].message }, { status: 400 });
+    }
     if (error instanceof z.ZodError || error instanceof SyntaxError)
       return Response.json(
         { error: "提交的内容有误，请检查后重试。" },

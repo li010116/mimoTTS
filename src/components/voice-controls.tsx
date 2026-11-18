@@ -34,10 +34,12 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Separator } from "@/components/ui/separator";
 import {
   type Asset,
+  type AudioFormat,
   type Draft,
   type Voice,
   type VoiceMode,
   presetVoices,
+  voiceLabel,
 } from "@/lib/types";
 import { AudioPlayer } from "./audio-player";
 
@@ -83,11 +85,12 @@ export function VoiceControls({
   const currentPreset = presetVoices.find(
     (voice) => voice.id === draft.config.preset,
   );
+  const presetName = voiceLabel(draft.config);
+  const isPreset = draft.config.mode === "preset";
   const savedVoice = voices.find((voice) => voice.id === draft.voiceId);
   const updateConfig = (value: Partial<Draft["config"]>) =>
-    onChange({ config: { ...draft.config, ...value } });
-  const streamingAvailable =
-    draft.config.mode === "preset" && draft.format === "wav";
+    onChange({ config: { ...draft.config, ...value }, voiceId: null });
+  const streamingAvailable = draft.format !== "mp3";
 
   async function upload(file: File | undefined) {
     if (!file) return;
@@ -177,12 +180,13 @@ export function VoiceControls({
               <div
                 className={`voice-monogram ${currentPreset?.color ?? "peach"}`}
               >
-                {draft.config.preset.slice(0, 1)}
+                {presetName.slice(0, 1)}
               </div>
               <div>
-                <strong>{draft.config.preset}</strong>
+                <strong>{presetName}</strong>
                 <span>
-                  {currentPreset?.description} · {currentPreset?.gender}
+                  {currentPreset?.description}
+                  {currentPreset && "gender" in currentPreset && ` · ${currentPreset.gender}`}
                 </span>
               </div>
               <AudioLines aria-hidden="true" />
@@ -203,8 +207,9 @@ export function VoiceControls({
                     <SelectGroup>
                       {presetVoices.map((voice) => (
                         <SelectItem key={voice.id} value={voice.id}>
-                          {voice.id} · {voice.language}
-                          {voice.gender}
+                          {"label" in voice
+                            ? voice.label
+                            : `${voice.id} · ${voice.language}${voice.gender}`}
                         </SelectItem>
                       ))}
                     </SelectGroup>
@@ -232,6 +237,20 @@ export function VoiceControls({
                 <FieldDescription>
                   年龄、质感和说话习惯，越具体越贴近预期。
                 </FieldDescription>
+              </Field>
+              <Field orientation="horizontal">
+                <div>
+                  <FieldLabel htmlFor="optimize-text-preview">智能文案</FieldLabel>
+                  <FieldDescription id="optimize-text-help">
+                    润色已有台词，或留空自动写稿。最终文案显示在生成版本里。
+                  </FieldDescription>
+                </div>
+                <Switch
+                  id="optimize-text-preview"
+                  aria-describedby="optimize-text-help"
+                  checked={draft.optimizeTextPreview ?? false}
+                  onCheckedChange={(optimizeTextPreview) => onChange({ optimizeTextPreview })}
+                />
               </Field>
             </FieldGroup>
           </TabsContent>
@@ -345,7 +364,7 @@ export function VoiceControls({
             <Select
               value={draft.format}
               onValueChange={(format) =>
-                onChange({ format: format as "wav" | "mp3" })
+                onChange({ format: format as AudioFormat })
               }
             >
               <SelectTrigger id="output-format" className="format-select">
@@ -355,23 +374,29 @@ export function VoiceControls({
                 <SelectGroup>
                   <SelectItem value="wav">WAV</SelectItem>
                   <SelectItem value="mp3">MP3</SelectItem>
+                  <SelectItem value="pcm16">PCM16</SelectItem>
                 </SelectGroup>
               </SelectContent>
             </Select>
           </Field>
           <Field orientation="horizontal">
             <div>
-              <FieldLabel htmlFor="streaming">边生成边试听</FieldLabel>
-              <FieldDescription>
+              <FieldLabel htmlFor="streaming">
+                {isPreset ? "边生成边试听" : "SSE 兼容模式"}
+              </FieldLabel>
+              <FieldDescription id="streaming-help">
                 {streamingAvailable
-                  ? "生成时即时听见声音"
-                  : "当前模式将在生成后播放"}
+                  ? isPreset
+                    ? "生成时即时听见声音"
+                    : "合成完成后一次返回音频"
+                  : "MP3 在生成完成后返回"}
               </FieldDescription>
             </div>
             <Switch
               id="streaming"
-              checked={draft.stream && streamingAvailable}
-              onCheckedChange={(stream) => onChange({ stream })}
+              aria-describedby="streaming-help"
+              checked={streamingAvailable && (isPreset ? draft.stream : draft.compatibilityStream ?? false)}
+              onCheckedChange={(enabled) => onChange(isPreset ? { stream: enabled } : { compatibilityStream: enabled })}
               disabled={!streamingAvailable}
             />
           </Field>

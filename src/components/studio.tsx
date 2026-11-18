@@ -11,10 +11,11 @@ import {
   Bookmark,
   BookmarkPlus,
   Check,
-  ChevronDown,
   ChevronRight,
   CircleAlert,
   CircleHelp,
+  Eye,
+  EyeOff,
   FileText,
   Headphones,
   History,
@@ -29,7 +30,6 @@ import {
   Radio,
   Search,
   Settings2,
-  Smile,
   Sun,
   Volume2,
 } from "lucide-react";
@@ -82,16 +82,20 @@ import {
   type Draft,
   type Generation,
   type StudioState,
+  type ApiSettingsState,
   type Voice,
   defaultInstruction,
-  exampleText,
+  outputMode,
+  usesTextPreview,
   voiceLabel,
 } from "@/lib/types";
+import { type TtsExample } from "@/lib/tts-examples";
 import { cn } from "@/lib/utils";
 import { readSse } from "@/lib/sse";
 import { PcmPlayer } from "@/lib/pcm-player";
 import { VoiceControls } from "./voice-controls";
 import { Versions } from "./versions";
+import { ScriptMenus } from "./script-menus";
 
 type View = "studio" | "voices" | "history" | "settings";
 const navigation = [
@@ -311,6 +315,32 @@ export function Studio() {
       updatedAt: Date.now(),
     });
   }
+  function applyExample(example: TtsExample) {
+    if (!draft) return;
+    const mode = example.mode ?? "preset";
+    const referenceId = mode === "clone" ? draft.config.referenceId : null;
+    loadDraft({
+      id: crypto.randomUUID(),
+      title: example.title,
+      text: example.text,
+      instruction: example.instruction ?? "",
+      config: {
+        mode,
+        preset: example.voice ?? "mimo_default",
+        description: example.description ?? "",
+        referenceId,
+      },
+      voiceId: null,
+      format: example.format ?? "wav",
+      stream: mode === "preset" && Boolean(example.stream),
+      compatibilityStream: mode !== "preset" && Boolean(example.stream),
+      optimizeTextPreview: example.optimizeTextPreview,
+      updatedAt: Date.now(),
+    });
+    toast.info(mode === "clone" && !referenceId
+      ? "已创建案例草稿，请上传一段参考音频。"
+      : "已用案例创建新草稿");
+  }
   function insertTag(tag: string) {
     if (!draft) return;
     const position = textarea.current?.selectionStart ?? draft.text.length;
@@ -328,6 +358,24 @@ export function Studio() {
       );
     });
   }
+  function insertOpeningTag(tag: string) {
+    if (!draft) return;
+    const text = draft.text.trimStart();
+    const prefix = /^(?:\(([^()\r\n]+)\)|（([^（）\r\n]+)）|\[([^\[\]\r\n]+)\])/.exec(text);
+    const current = prefix?.slice(1).find(Boolean)?.trim();
+    if (current && /^(唱歌|sing|singing)$/i.test(current)) {
+      if (tag !== "唱歌") toast.info("唱歌时请把歌词直接放在唱歌标签后。");
+      return;
+    }
+    const singing = tag === "唱歌";
+    const style = current && !singing ? `${current} ${tag}` : tag;
+    const next = `(${style})${text.slice(prefix?.[0].length ?? 0)}`;
+    if (next.length > 2000) {
+      toast.error("文案已接近 2,000 字上限，请先缩短。");
+      return;
+    }
+    edit({ text: next });
+  }
   function updateGeneration(value: Generation) {
     queryClient.setQueryData<StudioState>(["studio"], (current) =>
       current
@@ -342,7 +390,7 @@ export function Studio() {
     );
   }
   async function generateAudio() {
-    if (!draft?.text.trim() || generating) return;
+    if (!draft || generating || (!draft.text.trim() && !usesTextPreview(draft))) return;
     if (!data?.configured) {
       changeView("settings");
       toast.info("配置 MiMo API Key 后，就可以生成第一段配音。");
@@ -362,11 +410,7 @@ export function Studio() {
     let streamPlayer: PcmPlayer | null = null;
     let terminal = false;
     try {
-      if (
-        snapshot.stream &&
-        snapshot.config.mode === "preset" &&
-        snapshot.format === "wav"
-      ) {
+      if (outputMode(snapshot) === "live") {
         streamPlayer = new PcmPlayer();
         pcmPlayer.current = streamPlayer;
         try {
@@ -443,6 +487,16 @@ export function Studio() {
   }
   function restore(generation: Generation) {
     if (generating) return;
+    const parameters = {
+      text: generation.text,
+      instruction: generation.instruction,
+      config: { ...generation.config },
+      format: generation.format,
+      ...(generation.stream !== undefined ? { stream: generation.stream } : {}),
+      compatibilityStream: generation.compatibilityStream,
+      optimizeTextPreview: generation.optimizeTextPreview,
+      voiceId: null,
+    };
     if (view !== "studio") {
       const original = data?.drafts.find(
         (item) => item.id === generation.draftId,
@@ -450,22 +504,13 @@ export function Studio() {
       if (original) {
         loadDraft({
           ...original,
-          text: generation.text,
-          instruction: generation.instruction,
-          config: generation.config,
-          format: generation.format,
+          ...parameters,
         });
         toast.success(`已恢复「${generation.name}」的文案和参数`);
         return;
       }
     }
-    edit({
-      text: generation.text,
-      instruction: generation.instruction,
-      config: { ...generation.config },
-      format: generation.format,
-      voiceId: null,
-    });
+    edit(parameters);
     changeView("studio");
     toast.success(`已恢复「${generation.name}」的文案和参数`);
   }
@@ -822,7 +867,9 @@ export function Studio() {
                             id="script"
                             value={draft.text}
                             maxLength={2000}
-                            placeholder="在这里写下，想让声音传达的文字……"
+                            placeholder={usesTextPreview(draft)
+                              ? "输入要润色的台词，或留空由 MiMo 写稿"
+                              : "在这里写下，想让声音传达的文字……"}
                             onChange={(event) =>
                               edit({ text: event.target.value })
                             }
@@ -837,50 +884,13 @@ export function Studio() {
                           </div>
                         </div>
                         <div className="script-tools">
-                          <div className="tag-tools">
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <Button variant="ghost" size="sm">
-                                  <Smile />
-                                  插入标签
-                                  <ChevronDown />
-                                </Button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="start">
-                                <DropdownMenuGroup>
-                                  {[
-                                    "轻笑",
-                                    "叹气",
-                                    "深呼吸",
-                                    "小声",
-                                    "停顿",
-                                    "激动",
-                                    "温柔",
-                                    "哽咽",
-                                  ].map((tag) => (
-                                    <DropdownMenuItem
-                                      key={tag}
-                                      onSelect={() => insertTag(tag)}
-                                    >
-                                      {tag}
-                                    </DropdownMenuItem>
-                                  ))}
-                                </DropdownMenuGroup>
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                            <Separator orientation="vertical" />
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => {
-                                edit({ text: exampleText });
-                                toast.info("已填入示例文案");
-                              }}
-                            >
-                              <FileText />
-                              示例文案
-                            </Button>
-                          </div>
+                          <ScriptMenus
+                            singingAvailable={draft.config.mode === "preset"}
+                            onSing={() => insertOpeningTag("唱歌")}
+                            onStyle={insertOpeningTag}
+                            onInlineTag={insertTag}
+                            onExample={applyExample}
+                          />
                           <Button
                             variant="ghost"
                             size="icon-sm"
@@ -899,9 +909,7 @@ export function Studio() {
                             </span>
                             <span className="context-divider">/</span>
                             <span>{draft.format.toUpperCase()}</span>
-                            {draft.stream &&
-                              draft.config.mode === "preset" &&
-                              draft.format === "wav" && (
+                            {outputMode(draft) === "live" && (
                                 <span className="stream-label">
                                   <Radio />
                                   实时试听
@@ -911,7 +919,7 @@ export function Studio() {
                           <Button
                             size="lg"
                             className="generate-button"
-                            disabled={!draft.text.trim() || generating}
+                            disabled={generating || (!draft.text.trim() && !usesTextPreview(draft))}
                             onClick={() => {
                               void generateAudio();
                             }}
@@ -1136,7 +1144,18 @@ export function Studio() {
                 </div>
               )}
               {view === "settings" && (
-                <SettingsView configured={data.configured} onSaved={refresh} />
+                <SettingsView
+                  configured={data.configured}
+                  baseUrl={data.baseUrl}
+                  apiKeyLength={data.apiKeyLength ?? 0}
+                  onSaved={(settings) => {
+                    queryClient.setQueryData<StudioState>(
+                      ["studio"],
+                      (current) => current ? { ...current, ...settings } : current,
+                    );
+                    refresh();
+                  }}
+                />
               )}
             </>
           )}
@@ -1245,15 +1264,35 @@ export function Studio() {
   );
 }
 
+function readConnectionForm(form: HTMLFormElement) {
+  const values = new FormData(form);
+  return {
+    apiKey: String(values.get("apiKey") ?? ""),
+    baseUrl: String(values.get("baseUrl") ?? ""),
+  };
+}
+
 function SettingsView({
   configured,
+  baseUrl,
+  apiKeyLength,
   onSaved,
 }: {
   configured: boolean;
-  onSaved: () => void;
+  baseUrl: string;
+  apiKeyLength: number;
+  onSaved: (settings: ApiSettingsState) => void;
 }) {
-  const [key, setKey] = useState("");
+  const keyInput = useRef<HTMLInputElement>(null);
+  const [showKey, setShowKey] = useState(false);
+  const [inputKeyLength, setInputKeyLength] = useState(0);
+  const [endpoint, setEndpoint] = useState(baseUrl);
   const [saving, setSaving] = useState(false);
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [connectionResult, setConnectionResult] = useState<{
+    success: boolean;
+    message: string;
+  } | null>(null);
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
@@ -1261,22 +1300,30 @@ function SettingsView({
     <div className="settings-view">
       <section className="settings-section">
         <div>
-          <h2>连接 MiMo</h2>
-          <p>使用你自己的 API Key 生成配音。</p>
+          <h2>API 连接</h2>
+          <p>配置配音服务的地址和 API Key。</p>
         </div>
         <form
           className="panel settings-panel"
+          autoComplete="off"
           onSubmit={async (event) => {
             event.preventDefault();
+            if (saving || testingConnection) return;
+            const values = readConnectionForm(event.currentTarget);
+            setEndpoint(values.baseUrl);
+            setConnectionResult(null);
             setSaving(true);
             try {
-              await api("/api/settings", {
+              const saved = await api<ApiSettingsState>("/api/settings", {
                 method: "POST",
-                body: JSON.stringify({ apiKey: key }),
+                body: JSON.stringify(values),
               });
-              setKey("");
-              onSaved();
-              toast.success("API Key 已保存");
+              if (keyInput.current) keyInput.current.value = "";
+              setInputKeyLength(0);
+              setShowKey(false);
+              setEndpoint(saved.baseUrl);
+              onSaved(saved);
+              toast.success("API 连接设置已保存");
             } catch (error) {
               toast.error((error as Error).message);
             } finally {
@@ -1288,39 +1335,77 @@ function SettingsView({
             <Field>
               <div className="settings-label-row">
                 <FieldLabel htmlFor="api-key">API Key</FieldLabel>
-                <span
-                  className={cn(
-                    "configuration-status",
-                    configured && "configured",
-                  )}
-                >
-                  {configured ? "已配置" : "待配置"}
-                </span>
+                <div className="api-key-actions">
+                  <span
+                    className={cn(
+                      "configuration-status",
+                      configured && "configured",
+                    )}
+                  >
+                    {configured ? "已保存" : "待配置"}
+                    {configured && apiKeyLength > 0 && ` · ${apiKeyLength} 字符`}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label={showKey ? "隐藏输入的 Key" : "显示输入的 Key"}
+                    disabled={saving || testingConnection}
+                    onClick={() => {
+                      setInputKeyLength(keyInput.current?.value.length ?? 0);
+                      setShowKey((visible) => !visible);
+                    }}
+                  >
+                    {showKey ? <EyeOff /> : <Eye />}
+                  </Button>
+                </div>
               </div>
               <Input
                 id="api-key"
-                type="password"
-                autoComplete="new-password"
-                value={key}
-                onChange={(event) => setKey(event.target.value)}
+                name="apiKey"
+                ref={keyInput}
+                type={showKey ? "text" : "password"}
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                data-1p-ignore="true"
+                data-lpignore="true"
+                defaultValue=""
+                onInput={(event) => {
+                  setInputKeyLength(event.currentTarget.value.length);
+                  setConnectionResult(null);
+                }}
                 placeholder={
-                  configured ? "输入新的 Key 以替换" : "输入 MiMo API Key"
+                  configured ? "已配置，留空保留原 Key" : "输入 API Key"
                 }
-                minLength={8}
-                maxLength={512}
-                required
+                disabled={saving || testingConnection}
               />
               <FieldDescription>
                 Key 保存在本机服务端，调用时由服务端携带。
+                {inputKeyLength > 0 && ` 本次输入 ${inputKeyLength} 个字符。`}
               </FieldDescription>
             </Field>
             <Field>
               <FieldLabel htmlFor="api-endpoint">服务地址</FieldLabel>
               <Input
                 id="api-endpoint"
-                value="https://api.xiaomimimo.com/v1"
-                readOnly
+                name="baseUrl"
+                type="url"
+                value={endpoint}
+                onChange={(event) => {
+                  setEndpoint(event.target.value);
+                  setConnectionResult(null);
+                }}
+                placeholder="https://api.xiaomimimo.com/v1"
+                maxLength={2048}
+                disabled={saving || testingConnection}
+                required
               />
+              <FieldDescription>
+                填写基础地址（如 https://example.com/v1），也支持完整的
+                /chat/completions 地址。
+              </FieldDescription>
             </Field>
           </FieldGroup>
           <div className="settings-actions">
@@ -1332,10 +1417,70 @@ function SettingsView({
               前往 MiMo 获取 Key
               <ArrowUpRight />
             </a>
-            <Button type="submit" disabled={saving || key.trim().length < 8}>
-              {saving ? <LoaderCircle className="spin" /> : <Check />}保存 Key
-            </Button>
+            <div className="settings-action-buttons">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={saving || testingConnection || !endpoint.trim()}
+                onClick={async (event) => {
+                  const form = event.currentTarget.form;
+                  if (!form || !form.reportValidity()) return;
+                  const values = readConnectionForm(form);
+                  setEndpoint(values.baseUrl);
+                  setTestingConnection(true);
+                  setConnectionResult(null);
+                  try {
+                    const result = await api<{
+                      message: string;
+                      latencyMs: number;
+                    }>("/api/settings/test", {
+                      method: "POST",
+                      body: JSON.stringify(values),
+                    });
+                    setConnectionResult({
+                      success: true,
+                      message: `${result.message} 耗时 ${result.latencyMs} ms。`,
+                    });
+                  } catch (error) {
+                    setConnectionResult({
+                      success: false,
+                      message:
+                        error instanceof Error
+                          ? error.message
+                          : "连接失败，请稍后重试。",
+                    });
+                  } finally {
+                    setTestingConnection(false);
+                  }
+                }}
+              >
+                {testingConnection ? (
+                  <LoaderCircle className="spin" />
+                ) : (
+                  <Radio />
+                )}
+                {testingConnection ? "测试中…" : "测试连接"}
+              </Button>
+              <Button
+                type="submit"
+                disabled={saving || testingConnection || !endpoint.trim()}
+              >
+                {saving ? <LoaderCircle className="spin" /> : <Check />}保存配置
+              </Button>
+            </div>
           </div>
+          {connectionResult && (
+            <Alert
+              variant={connectionResult.success ? "default" : "destructive"}
+              className="connection-test-result"
+              data-success={connectionResult.success}
+              role="status"
+              aria-live="polite"
+            >
+              {connectionResult.success ? <Check /> : <CircleAlert />}
+              <AlertDescription>{connectionResult.message}</AlertDescription>
+            </Alert>
+          )}
         </form>
       </section>
       <section className="settings-section">
